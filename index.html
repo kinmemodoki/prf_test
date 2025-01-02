@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebAuthn PRF拡張デモ</title>
+</head>
+<body>
+    <h1>WebAuthn PRF拡張デモ</h1>
+    <button id="register">register (with PRF)</button>
+    <div id="reg-output" style="margin-top: 20px; color: green;"></div>
+
+    <button id="authenticate">authenticate (with PRF)</button>
+    <div id="auth-output" style="margin-top: 20px; color: green;"></div>
+
+    <input id="message-raw" type="text"/>
+    <button id="encrypt">encrypt</button>
+    <div id="encrypted-output" style="margin-top: 20px; color: green;"></div>
+
+    <input id="message-enc" type="text"/>
+    <button id="decrypt">decrypt</button>
+    <div id="decrypted-output" style="margin-top: 20px; color: green;"></div>
+
+    <script>
+        const challenge = new Uint8Array([1, 2, 3, 4]);
+        const userId = new Uint8Array([1, 2, 3, 4]);
+        const salt = new Uint8Array(new Array(32).fill(1));
+        const state = {};
+
+        document.getElementById('register').addEventListener('click', async () => {
+            const output = document.getElementById('reg-output');
+
+            try {
+                const options = {
+                    publicKey: {
+                        challenge: challenge,
+                        rp: {
+                            name: "PRF拡張デモRP"
+                        },
+                        user: {
+                            id: userId,
+                            name: "demo-user",
+                            displayName: "Demo User"
+                        },
+                        pubKeyCredParams: [
+                            { alg: -7, type: 'public-key' },   // ES256
+                            { alg: -257, type: 'public-key' }, // RS256
+                        ],
+                        authenticatorSelection: {
+                            userVerification: "preferred"
+                        },
+                        timeout: 60000,
+                        extensions: {
+                            prf: {
+                                eval: {
+                                    first: salt,
+                                },
+                            },
+                        },
+                    }
+                };
+
+                const credential = await navigator.credentials.create(options);
+                const extensionResults = credential.getClientExtensionResults();
+
+                console.log({extensionResults});
+                let outputText = "";
+                if (extensionResults?.prf?.enabled) {
+                    outputText += "このクレデンシャルはprfに対応しています"
+                } else {
+                    outputText += "このクレデンシャルはprfに対応していません"
+                }
+                outputText += `${JSON.stringify(extensionResults)}`;
+                output.textContent = `${outputText}`;
+            } catch (error) {
+                console.error(error);
+                output.textContent = "登録に失敗しました。";
+            }
+        });
+
+        document.getElementById('authenticate').addEventListener('click', async () => {
+            const output = document.getElementById('auth-output');
+
+            try {
+                const options = {
+                    publicKey: {
+                        challenge: challenge,
+                        allowCredentials: [],
+                        timeout: 60000,
+                        userVerification: "discouraged",
+                        extensions: {
+                            prf: {
+                                eval: {
+                                    first: salt,
+                                },
+                            },
+                        },
+                    }
+                };
+
+                const credential = await navigator.credentials.get(options);
+                const extensionResults = credential.getClientExtensionResults();
+                if (extensionResults.prf?.results?.first) {
+                    state.prf = new Uint8Array(extensionResults.prf.results.first);
+                    state.prfKey = await crypto.subtle.importKey(
+                        'raw',
+                        state.prf,
+                        {name: 'AES-GCM', length: 256},
+                        false, // exportable
+                        ['encrypt', 'decrypt']
+                    );
+                    output.textContent = "prf(first): " + state.prf.toHex();
+                } else {
+                    output.textContent = "prf extentionの結果が出力されませんでした。prf対応のクレデンシャルを再度作成してください。";
+                }
+            } catch (error) {
+                console.error(error);
+                output.textContent = "認証に失敗しました。";
+            }
+        });
+
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        document.getElementById('encrypt').addEventListener('click', async () => {
+            const output = document.getElementById('encdec-output');
+            const input = document.getElementById('message').value;
+            const encoder = new TextEncoder();
+
+            try {
+                const encrypted = await crypto.subtle.encrypt(
+                    {
+                        name: "AES-GCM",
+                        length: 256,
+                        iv
+                    },
+                    state.prfKey,
+                    encoder.encode(input)
+                );
+                state.encrypted = encrypted;
+                console.log(encrypted);
+                output.textContent = encodeHex(iv) + "." + encodeHex(encrypted);
+            } catch(e) {
+                console.log(e)
+            }
+        });
+
+        document.getElementById('decrypt').addEventListener('click', async () => {
+            const output = document.getElementById('encdec-output');
+            const decoder = new TextDecoder();
+
+            try {
+                const decrypted = await crypto.subtle.decrypt({
+                    name: "AES-GCM",
+                    length: 256,
+                    iv
+                }, state.prfKey, state.encrypted);
+                const decryptedText = decoder.decode(decrypted);
+                output.textContent = decryptedText;
+            } catch(e) {
+                console.log(e)
+            }
+        });
+
+        function encodeHex(array) {
+            return Array.from(new Uint8Array(array))
+                .map(b => b.toString(16).padStart(2, '0'))
+                .join('');
+        }
+        function decodeHex(text) {
+            text = text.replace(/[^0-9a-zA-Z]+/g, '');
+            const match = text.match(/[0-9a-fA-F]{1,2}/g);
+            if (text.match(/^[0-9a-fA-F]+$/) && match && match.length) {
+                return Uint8Array.from(match.map(byte => parseInt(byte, 16)));
+            }
+            throw new Error('Bad input to decodeHex');
+        }
+    </script>
+</body>
+</html>
